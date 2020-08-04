@@ -1,5 +1,7 @@
 #include <iostream>
 #include <iomanip>
+#include <string>
+#include <stdexcept>
 #include <stdio.h>
 #include <cstring>
 #include "Windows.h"
@@ -31,12 +33,16 @@ int wmain(int argc, wchar_t* argv[]){
 	SetConsoleMode(inHandle, consoleMode & (~ENABLE_QUICK_EDIT_MODE));
     
     bool qs{0};
-    unsigned short* sessionID{nullptr};
+    unsigned long sessionID{1000000};//initialize to number that will never be actual session ID
     if(argc>1){
         if (wcscmp(argv[1],L"/k")==0){
-            sessionID = reinterpret_cast<unsigned short*>(argv[2]);
-            *sessionID = (*sessionID)-48;
-            if(WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE,*sessionID,1)!=0){
+            std::wstring sessionIdWStr{argv[2]};
+            try{sessionID = std::stoul(sessionIdWStr);}
+            catch(std::logic_error& le){
+                std::wcout<<L"\nFailed to terminate user session";
+                return -1;
+            }
+            if(WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE,sessionID,1)!=0){
                 std::wcout<<L"\nSuccessfully terminated the user session";
                 return 0;                    
             }
@@ -49,7 +55,7 @@ int wmain(int argc, wchar_t* argv[]){
         else {printHelp(); return 0;}
     }
     
-    wchar_t idChosen[10]{};//Will store the ID of the session to terminate
+    std::wstring idChosen{10,L'\0'};//Will store the ID of the session to terminate
     wchar_t yesNo[10]{};//Will store final confirmation of user to terminate
     unsigned long numOfSession;
     unsigned long level{1};
@@ -71,16 +77,17 @@ int wmain(int argc, wchar_t* argv[]){
         printSessions(session,numOfSession);
         std::wcout<<"\nYou can type E/e to exit or->\nType the ID number of the session to terminate and press enter: ";
         std::wcout.flush();
-        std::wcin.clear();        
-        std::wcin.getline(idChosen,10);
-        if(wcscmp(idChosen,L"e")==0 || wcscmp(idChosen,L"E")==0){
+        std::wcin.clear();
+        std::wcin.getline(idChosen.data(),10);
+        if(wcscmp(idChosen.data(),L"e")==0 || wcscmp(idChosen.data(),L"E")==0){
             WTSFreeMemoryExW(WTSTypeSessionInfoLevel1,session,numOfSession);
             return 0;
         }
-        sessionID = reinterpret_cast<unsigned short*>(&idChosen);
-        *sessionID = (*sessionID) - 48;
+        try{sessionID = std::stoul(idChosen);}
+        catch(std::logic_error& le){idChosen.clear();continue;}
         for(unsigned long c{0};c<numOfSession;++c){
-            if(*sessionID == static_cast<unsigned short>(session[c].SessionId)){
+            std::wcout<<L'\n'<<sessionID<< L" ; "<<session[c].SessionId<<L'\n';
+            if(sessionID == session[c].SessionId){
                 clearConsole(outHandle);
                 std::wcout<<std::setw(12)<<session[c].SessionId<<
                 std::setw(12)<<session[c].pUserName;
@@ -109,7 +116,7 @@ int wmain(int argc, wchar_t* argv[]){
                 }
             }
         }
-        zeroWcharBuff(idChosen,10);zeroWcharBuff(yesNo,10);
+        idChosen.clear();zeroWcharBuff(yesNo,10);
     }
 }
 
