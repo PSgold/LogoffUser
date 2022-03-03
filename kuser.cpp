@@ -1,6 +1,12 @@
+#define _WIN32_DCOM
+#define WINVER 0x0A00
+#define _WIN32_WINNT 0x0A00
+#define WIN32_LEAN_AND_MEAN
+
 #include <iostream>
 #include <iomanip>
 #include <string>
+#include <sstream>
 #include <stdexcept>
 #include <stdio.h>
 #include <cstring>
@@ -8,14 +14,29 @@
 #include "WtsApi32.h"
 #include "io.h"
 #include "fcntl.h"
+#include "comdef.h"
+#include "taskschd.h"
 
-void clearConsole( HANDLE hConsole );
-void zeroWcharBuff(wchar_t* buff, unsigned short size);
+#pragma comment(lib, "taskschd.lib")
+#pragma comment(lib, "comsupp.lib")
+#pragma comment(lib, "credui.lib")
+
+const std::wstring rootTaskFolder{L'\\'};//Task Scheduler root folder
+const std::wstring customTaskFolder{L"\\Logoff"};//Task Scheduler custom folder
+const std::wstring baseTaskName{L"Logoff Session "};//Base task name
+
 void printSessions(WTS_SESSION_INFO_1W*& session,unsigned long numOfSession);
+std::wstring getSessionIdToUser(WTS_SESSION_INFO_1W*& session,unsigned long numOfSession,int idChosen);
 void printHelp();
-//void printWcharBuff(wchar_t* buff, unsigned short size);
+void printNewLine(unsigned short num=1);
+wchar_t* getDateTimeStrW(const std::wstring& time);
+std::wstring getEndBoundaryStrW(const std::wstring& time);
+int getProcessPath(wchar_t* pathBuff, unsigned short size);
+short querySession();
+short checkExistingTask();
+short scheduleLogoffTask(const std::wstring& sessionIdWStr,const std::wstring& userToLogOff, const std::wstring& time);
 
-int wmain(int argc, wchar_t* argv[]){
+int __cdecl wmain(int argc, wchar_t* argv[]){
     //Do not sync iostream with C stdio
     std::wios::sync_with_stdio(false);
 
@@ -32,10 +53,24 @@ int wmain(int argc, wchar_t* argv[]){
 	GetConsoleMode(inHandle, &consoleMode);
 	SetConsoleMode(inHandle, consoleMode & (~ENABLE_QUICK_EDIT_MODE));
     
-    bool qs{0};
     unsigned long sessionID{1000000};//initialize to number that will never be actual session ID
-    if(argc>1){
-        if (wcscmp(argv[1],L"/k")==0){
+    if(argc==2){
+        if(
+            wcscmp(argv[1],L"/qs")==0 || 
+            wcscmp(argv[1],L"/QS")==0 || 
+            wcscmp(argv[1],L"/Qs")==0 ||
+            wcscmp(argv[1],L"/qS")==0
+        ){querySession();return 0;}
+        else if(
+            wcscmp(argv[1],L"/ch")==0 || 
+            wcscmp(argv[1],L"/CH")==0 || 
+            wcscmp(argv[1],L"/Ch")==0 ||
+            wcscmp(argv[1],L"/cH")==0
+        )checkExistingTask();//Function to check for existance of task.
+        else {printHelp(); return 1;}
+    }
+    else if(argc==3){
+        if (wcscmp(argv[1],L"/k")==0 || wcscmp(argv[1],L"/K")==0){
             std::wstring sessionIdWStr{argv[2]};
             try{sessionID = std::stoul(sessionIdWStr);}
             catch(std::logic_error& le){
@@ -51,81 +86,47 @@ int wmain(int argc, wchar_t* argv[]){
                 return -1;
             }
         }
-        else if(wcscmp(argv[1],L"/qs")==0)qs=1;
-        else {printHelp(); return 0;}
+        else {printHelp(); return 1;}
     }
-    
-    std::wstring idChosen{10,L'\0'};//Will store the ID of the session to terminate
-    wchar_t yesNo[10]{};//Will store final confirmation of user to terminate
-    unsigned long numOfSession;
-    unsigned long level{1};
-    PWTS_SESSION_INFO_1W session;
-    if(WTSEnumerateSessionsExW(WTS_CURRENT_SERVER_HANDLE,&level,0,&session,&numOfSession)==0){
-        std::cout<<"Failed to Enumerate Sessions. Aborting!\n";return -1;
-    }
-
-    if(qs){
-        std::wcout<<L'\n';
-        printSessions(session,numOfSession);
-        std::wcout<<L'\n';
-        WTSFreeMemoryExW(WTSTypeSessionInfoLevel1,session,numOfSession);
-        return 0;
-    }
-
-    while(1){
-        clearConsole(outHandle);
-        printSessions(session,numOfSession);
-        std::wcout<<"\nYou can type E/e to exit or->\nType the ID number of the session to terminate and press enter: ";
-        std::wcout.flush();
-        std::wcin.clear();
-        std::wcin.getline(idChosen.data(),10);
-        if(wcscmp(idChosen.data(),L"e")==0 || wcscmp(idChosen.data(),L"E")==0){
-            WTSFreeMemoryExW(WTSTypeSessionInfoLevel1,session,numOfSession);
+    else if(argc==5){
+        if(
+            (wcscmp(argv[1],L"/k")==0 && wcscmp(argv[3],L"/t")==0) || 
+            (wcscmp(argv[1],L"/K")==0 && wcscmp(argv[3],L"/T")==0) ||
+            (wcscmp(argv[1],L"/K")==0 && wcscmp(argv[3],L"/t")==0) ||
+            (wcscmp(argv[1],L"/k")==0 && wcscmp(argv[3],L"/T")==0)
+        ){
+            std::wstring sessionIdWStr{argv[2]};//Stores the session ID argument to be logged off
+            int idChosenInt{std::stoi(sessionIdWStr)};
+            unsigned long numOfSession;
+            unsigned long level{1};
+            PWTS_SESSION_INFO_1W session;
+            if(WTSEnumerateSessionsExW(WTS_CURRENT_SERVER_HANDLE,&level,0,&session,&numOfSession)==0){
+                std::cout<<"Failed to Enumerate Sessions. Aborting!\n";return -1;
+            }
+            //Stores the user account name of user to be logged off
+            const std::wstring userToLogOff {getSessionIdToUser(session,numOfSession,idChosenInt)};
+            WTSFreeMemoryExW(WTSTypeSessionInfoLevel1,session,numOfSession);//Free session memory
+            std::wstring time{argv[4]};//Stores the requested logoff date and time
+            scheduleLogoffTask(sessionIdWStr,userToLogOff,time);
             return 0;
         }
-        try{sessionID = std::stoul(idChosen);}
-        catch(std::logic_error& le){idChosen.clear();continue;}
-        for(unsigned long c{0};c<numOfSession;++c){
-            std::wcout<<L'\n'<<sessionID<< L" ; "<<session[c].SessionId<<L'\n';
-            if(sessionID == session[c].SessionId){
-                clearConsole(outHandle);
-                std::wcout<<std::setw(12)<<session[c].SessionId<<
-                std::setw(12)<<session[c].pUserName;
-                if(session[c].State == 0)std::wcout<<std::setw(12)<<L"Connected";
-                else if(session[c].State==4)std::wcout<<std::setw(12)<<L"Disconnected";
-                else std::wcout<<std::setw(12)<<L"            ";
-                if(session[c].pSessionName!=NULL){
-                    std::wcout<<std::setw(12)<<session[c].pSessionName<<L'\n';
-                }
-                else std::wcout<<L"            \n";
-                std::wcout<<L"\nAre you sure you want to terminate this session Y/y(anything else for no)? ";
-                std::wcout.flush();std::wcin.clear();
-                std::wcin.getline(yesNo,10);
-                if (wcscmp(yesNo,L"Y")==0||wcscmp(yesNo,L"y")==0){
-                    if(WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE,session[c].SessionId,1)!=0){
-                        std::wcout<<L"\nSuccessfully terminated the user session";
-                        WTSFreeMemoryExW(WTSTypeSessionInfoLevel1,session,numOfSession);
-                        return 0;                     
-                    }
-                    else {
-                        clearConsole(outHandle);
-                        std::wcout<<L"Failed to terminate user session\n\n";
-                        WTSFreeMemoryExW(WTSTypeSessionInfoLevel1,session,numOfSession);
-                        return 0;                     
-                    }
-                }
-            }
-        }
-        idChosen.clear();zeroWcharBuff(yesNo,10);
+        else {printHelp(); return 1;}
     }
+    else {printHelp(); return 1;}
 }
 
+std::wstring getSessionIdToUser(WTS_SESSION_INFO_1W*& session,unsigned long numOfSession,int idChosen ){
+    for(unsigned long c{0};c<numOfSession;++c){
+        if(session[c].SessionId == idChosen)return session[c].pUserName;
+    }
+    return L"Failed to get name of user to log off";
+}
 
 void printSessions(WTS_SESSION_INFO_1W*& session,unsigned long numOfSession){
     //print column titles
     std::wcout<<std::left<<std::setw(12)<<L"ID"<<std::setw(12)<<L"User"
-    <<std::setw(12)<<L"State"<<std::setw(12)<<L"Session Type\n"
-    <<"==          ====        =====       ============\n\n";
+    <<std::setw(12)<<L"State"<<std::setw(12)<<L"Session Type";printNewLine();
+    std::wcout<<L"==          ====        =====       ============";printNewLine(2);
 
     //Print user sessions
     for(unsigned long c{0};c<numOfSession;++c){
@@ -136,84 +137,716 @@ void printSessions(WTS_SESSION_INFO_1W*& session,unsigned long numOfSession){
         else if(session[c].State==4)std::wcout<<std::setw(12)<<L"Disconnected";
         else std::wcout<<std::setw(12)<<L"            ";
         if(session[c].pSessionName!=NULL){
-            std::wcout<<std::setw(12)<<session[c].pSessionName<<L'\n';
+            std::wcout<<std::setw(12)<<session[c].pSessionName;printNewLine();
         }
-        else std::wcout<<L"            \n";
+        else {std::wcout<<L"            ";printNewLine();}
     }
     std::wcout.flush();
 }
 
-
-void zeroWcharBuff(wchar_t* buff, unsigned short size){
-    for (unsigned short c{0};c<size;++c)buff[c] = L'\0';
-}
-
-
 void printHelp(){
-    wchar_t help[]{
-LR"*(
-Command syntax:
-kuser.exe (do not use with remote console session)
-kuser.exe /qs (query sessions)
-kuser.exe /k [session id] (terminate session))*"
+    std::wcout.flush();
+    _setmode(_fileno(stdout), _O_TEXT);
+
+    char help[]{
+R"*(
+Command syntax
+
+Query Session:
+kuser.exe /qs
+
+Terminate Session Immediately:
+kuser.exe /k [session id])
+
+Terminate Session Scheduled
+kuser.exe /k [session id] /t [time]
+
+Check Scheduled Logoff:
+kuser.exe /ch)*"
 	};
-	std::wcout<<help<<L'\n'<< std::endl;
+	std::cout<<help<<'\n'<<'\n';
+    std::cout.flush();
+    
+    _setmode(_fileno(stdout), _O_U16TEXT);
 }
 
-
-/* void printWcharBuff(wchar_t* buff, unsigned short size){
-    for(unsigned short c{0};c<size;++c){
-        std::wcout<<buff[c]<<L'\n';
+void printNewLine(unsigned short num){
+    std::wcout.flush();
+    std::cout.flush();
+    _setmode(_fileno(stdout), _O_TEXT);
+    for(unsigned short c{0};c<num;++c){
+        std::cout<<'\n';
     }
-} */
+    std::cout.flush();
+    _setmode(_fileno(stdout), _O_U16TEXT);
+}
 
-//From https://docs.microsoft.com/en-us/windows/console/clearing-the-screen
-void clearConsole( HANDLE hConsole )
-{
-   COORD coordScreen = { 0, 0 };    // home for the cursor 
-   DWORD cCharsWritten;
-   CONSOLE_SCREEN_BUFFER_INFO csbi; 
-   DWORD dwConSize;
+wchar_t* getDateTimeStrW(const std::wstring& time){
+    //Get system time
+    std::time_t sysTime;
+    std::time(&sysTime);
+    std::tm cTime;//calendar time
+    localtime_s(&cTime, &sysTime);//puts sysTime into tm obj which holds time as calendar time
+    
+    //Check if scheduled hour of day has already passed
+    //If scheduled hour has passed then set date to next day
+    std::wstring hr{time.substr(0,2)};
+    std::wstring min{time.substr(3,2)};
+    unsigned tempInt{};
+    unsigned int hour {std::stoul(hr,&tempInt)};
+    unsigned int minute{std::stoul(min,&tempInt)};
+    if(hour<cTime.tm_hour || (hour==cTime.tm_hour&&minute<=cTime.tm_min))++(cTime.tm_mday);
+    
+    //places the tm obj with specific format into string buff, stringBuffO;fails if you try to put it directly into wostringstream 
+    std::ostringstream stringBuffO;
+    stringBuffO << std::put_time(&cTime, "%Y-%m-%d");
+    const std::string dateTimeTemp{stringBuffO.str()};//Move the string in stringBuffO to standard string variable
+    wchar_t* dateTimeStrW{new wchar_t[20]{}};
+    unsigned short dateTimeStrWIndex{};
+    for(unsigned short c{0};c<dateTimeTemp.length();++c){
+        dateTimeStrW[c] = dateTimeTemp[c];
+        if(c == (dateTimeTemp.length() - 1)){
+            ++c;dateTimeStrW[c] = L'T';
+            dateTimeStrWIndex = ++c;
+        }
+    }
+    for(unsigned short c{0};c<time.length();++c){
+        dateTimeStrW[dateTimeStrWIndex] = time[c];
+        ++dateTimeStrWIndex;
+        if(c == (time.length()-1)){
+            dateTimeStrW[dateTimeStrWIndex] = L':';
+            ++dateTimeStrWIndex;
+            dateTimeStrW[dateTimeStrWIndex] = L'0';
+            ++dateTimeStrWIndex;
+            dateTimeStrW[dateTimeStrWIndex] = L'0';
+            ++dateTimeStrWIndex;
+        }
+    }
+    return dateTimeStrW;
+}
 
-// Get the number of character cells in the current buffer. 
+std::wstring getEndBoundaryStrW(const std::wstring& time){
+    std::wstring hr{time.substr(0,2)};
+    std::wstring min{time.substr(3,2)};
+    unsigned int tempInt{};
+    unsigned int minute{std::stoul(min,&tempInt)};
+    unsigned int hour {std::stoul(hr,&tempInt)};
+    const unsigned short minToSubtract{50};
+    if(minute<50)minute+=10;
+    else{++hour;minute = (minute - minToSubtract);}
+    hr = std::to_wstring(hour);
+    min = std::to_wstring(minute);
+    std::wstring colon{L':'};
+    return (hr + colon + min);
+}
 
-   if( !GetConsoleScreenBufferInfo( hConsole, &csbi ))
-   {
-      return;
-   }
+int getProcessPath(wchar_t* pathBuff, unsigned short size){
+    return GetModuleFileNameW(NULL, pathBuff, size);
+}
 
-   dwConSize = csbi.dwSize.X * csbi.dwSize.Y;
+short querySession(){
+    unsigned long numOfSession;
+    unsigned long level{1};
+    PWTS_SESSION_INFO_1W session;
+    if(WTSEnumerateSessionsExW(WTS_CURRENT_SERVER_HANDLE,&level,0,&session,&numOfSession)==0){
+        std::cout<<"Failed to Enumerate Sessions. Aborting!\n";return -1;
+    }
+    printNewLine();
+    printSessions(session,numOfSession);
+    printNewLine();
+    WTSFreeMemoryExW(WTSTypeSessionInfoLevel1,session,numOfSession);
+    return 1;
+}
 
-   // Fill the entire screen with blanks.
+short scheduleLogoffTask(const std::wstring& sessionIdWStr,const std::wstring& userToLogOff, const std::wstring& time){
+    std::wstring processPath(MAX_PATH,L'\0');
+    int returnValue {getProcessPath(processPath.data(),MAX_PATH)};
+    if(returnValue == 0 || GetLastError() == ERROR_INSUFFICIENT_BUFFER){
+        printNewLine();
+        std::wcout<<L"Failed to get process path";
+        printNewLine();
+        return -1;
+    }
+    //  ------------------------------------------------------
+    //  Initialize COM.
+    HRESULT hr {CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE)};
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"CoInitializeEx failed: "<<hr;printNewLine();
+        return -2;
+    }
 
-   if( !FillConsoleOutputCharacter( hConsole,        // Handle to console screen buffer 
-                                    (TCHAR) ' ',     // Character to write to the buffer
-                                    dwConSize,       // Number of cells to write 
-                                    coordScreen,     // Coordinates of first cell 
-                                    &cCharsWritten ))// Receive number of characters written
-   {
-      return;
-   }
+        //  Set general COM security levels.
+    hr = CoInitializeSecurity(
+        NULL,
+        -1,
+        NULL,
+        NULL,
+        RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        NULL,
+        0,
+        NULL
+    );
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"CoInitializeSecurity failed: "<<hr;printNewLine();
+        CoUninitialize();
+        return -3;
+    }
+    
+    //  Create an instance of the Task Service. 
+    ITaskService* pService {nullptr};
+    hr = CoCreateInstance( 
+        CLSID_TaskScheduler,
+        NULL,
+        CLSCTX_INPROC_SERVER,
+        IID_ITaskService,
+        reinterpret_cast<void**>(&pService) 
+    );  
+    if (FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Failed to create an instance of ITaskService: "<<hr;
+        printNewLine();
+        CoUninitialize();
+        return -4;
+    }
+        
+    //  Connect to the task service.
+    hr = pService->Connect(_variant_t(), _variant_t(),_variant_t(), _variant_t());
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"ITaskService::Connect failed: "<<hr;
+        printNewLine();
+        pService->Release();
+        CoUninitialize();
+        return -5;
+    }
 
-   // Get the current text attribute.
+    //  Get the pointer to the root/custom task folder. The custom task folder will hold the
+    //  new task that is registered.
+    ITaskFolder* pRootFolder {nullptr};
+    ITaskFolder* customFolder {nullptr};
+    hr = pService->GetFolder(_bstr_t(customTaskFolder.data()),&customFolder);
+    if(FAILED(hr)){
+        hr = pService->GetFolder(_bstr_t(rootTaskFolder.data()),&pRootFolder);
+        if(FAILED(hr)){
+            printNewLine();
+            std::wcout<<L"Cannot get root folder: "<<hr;
+            printNewLine();
+            pService->Release();
+            CoUninitialize();
+            return -6;
+        }
 
-   if( !GetConsoleScreenBufferInfo( hConsole, &csbi ))
-   {
-      return;
-   }
+        BSTR pSddl;//will hold the sddl of root ts folder and then apply it to the new subfolder
+        SECURITY_INFORMATION securityInfo{};
+        pRootFolder->GetSecurityDescriptor(securityInfo,&pSddl);
+        hr = pRootFolder->CreateFolder(_bstr_t(customTaskFolder.data()),variant_t(pSddl),&customFolder);
+        if(FAILED(hr)){
+            printNewLine();
+            std::wcout<<L"Cannot create custom folder: "<<hr;
+            printNewLine();
+            pRootFolder->Release();
+            pService->Release();
+            CoUninitialize();
+            return -7;
+        }
+        pRootFolder->Release();                
+    }
+    
+    //  If the same task exists, remove it.
+    const std::wstring fullTaskName{baseTaskName+userToLogOff};
+    customFolder->DeleteTask( _bstr_t(fullTaskName.data()), 0);
 
-   // Set the buffer's attributes accordingly.
+    //  Create the task definition object to create the task.
+    ITaskDefinition* pTask {nullptr};
+    hr = pService->NewTask( 0, &pTask );
+    pService->Release();  // COM clean up.  Pointer is no longer used.
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Failed to CoCreate an instance of the TaskService class: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        CoUninitialize();
+        return -8;
+    }
 
-   if( !FillConsoleOutputAttribute( hConsole,         // Handle to console screen buffer 
-                                    csbi.wAttributes, // Character attributes to use
-                                    dwConSize,        // Number of cells to set attribute 
-                                    coordScreen,      // Coordinates of first cell 
-                                    &cCharsWritten )) // Receive number of characters written
-   {
-      return;
-   }
+    //  Get the registration info for setting the identification.
+    IRegistrationInfo* pRegInfo{nullptr};
+    hr = pTask->get_RegistrationInfo( &pRegInfo );
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot get identification pointer: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -9;
+    }
+    
+    std::wstring description{L"Logoff tool created by ShaiG/PSGold: Will logoff " + userToLogOff+L" at next run time"};
+    hr = pRegInfo->put_Description(bstr_t(description.data()));
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Failed to set user as description: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -10;
+    }
+    
+    hr = pRegInfo->put_Documentation(bstr_t(userToLogOff.data()));
+    pRegInfo->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Failed to document user: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -11;
+    }
 
-   // Put the cursor at its home coordinates.
+    //  Create the principal for the task - these credentials
+    //  are overwritten with the credentials passed to RegisterTaskDefinition
+    IPrincipal* pPrincipal{nullptr};
+    hr = pTask->get_Principal( &pPrincipal );
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot get principal pointer: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -12;
+    }
+    
+    //  Set up principal logon type to interactive logon
+    hr = pPrincipal->put_LogonType(TASK_LOGON_S4U);
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot put principal info: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -13;
+    }
 
-   SetConsoleCursorPosition( hConsole, coordScreen );
+    hr = pPrincipal->put_RunLevel(TASK_RUNLEVEL_HIGHEST);
+    pPrincipal->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot put run level to highest: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -14;
+    }
+
+    //  Create the settings for the task
+    ITaskSettings* pSettings{nullptr};
+    hr = pTask->get_Settings( &pSettings );
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot get settings pointer: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -15;
+    }
+    
+    //  Set settings values for the task.  
+    hr = pSettings->put_StartWhenAvailable(VARIANT_FALSE);
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<"Cannot put setting information: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pSettings->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -16;
+    }
+    hr = pSettings->put_DisallowStartIfOnBatteries(VARIANT_FALSE);
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<"Cannot put setting information: "<<hr;
+        printNewLine();
+        pSettings->Release();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -16;
+    }
+    hr = pSettings->put_DeleteExpiredTaskAfter(bstr_t(L"PT10M"));
+    pSettings->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<"Cannot put setting information: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -16;
+    }
+    
+
+    // Set the idle settings for the task.
+    IIdleSettings *pIdleSettings{nullptr};
+    hr = pSettings->get_IdleSettings( &pIdleSettings );
+    pSettings->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot get idle setting information: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -17;
+    }
+
+    hr = pIdleSettings->put_WaitTimeout(_bstr_t(L"PT5M"));
+    pIdleSettings->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot put idle setting information: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -18;
+    }
+
+    //  Get the trigger collection to insert the time trigger.
+    ITriggerCollection* pTriggerCollection {nullptr};
+    hr = pTask->get_Triggers( &pTriggerCollection );
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot get trigger collection: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -19;
+    }
+
+    //  Add the time trigger to the task.
+    ITrigger* pTrigger {nullptr};    
+    hr = pTriggerCollection->Create( TASK_TRIGGER_TIME, &pTrigger );     
+    pTriggerCollection->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot create trigger: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -20;
+    }
+
+    ITimeTrigger* pTimeTrigger{nullptr};
+    hr = pTrigger->QueryInterface(IID_ITimeTrigger, reinterpret_cast<void**>(&pTimeTrigger));
+    pTrigger->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"QueryInterface call failed for ITimeTrigger: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -21;
+    }
+
+    hr = pTimeTrigger->put_Id(_bstr_t(L"Trigger1"));
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot put trigger ID: "<<hr;
+        printNewLine();
+    }
+    
+    //  Set the task to start at a certain time. The time 
+    //  format should be YYYY-MM-DDTHH:MM:SS(+-)(timezone).
+    wchar_t* dateTimeStrW{getDateTimeStrW(time)};
+    hr = pTimeTrigger->put_StartBoundary(_bstr_t(dateTimeStrW));
+    delete [] dateTimeStrW;
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot add start boundary to trigger: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -22;
+    }
+    // Set an end boundary so it expires so we can delete task after it expires
+    std::wstring endBoundaryTime{getEndBoundaryStrW(time)};
+    wchar_t* endBoundaryStrW{getDateTimeStrW(endBoundaryTime)};
+    hr = pTimeTrigger->put_EndBoundary(_bstr_t(endBoundaryStrW));
+    pTimeTrigger->Release();
+    delete [] endBoundaryStrW;
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot add end boundary to trigger: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -23;
+    }
+
+    //  Add an action to the task. This task will execute kuser.exe.     
+    IActionCollection* pActionCollection{nullptr};
+    hr = pTask->get_Actions( &pActionCollection );//  Get the task action collection pointer.
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot get Task collection pointer: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -24;
+    }
+
+        //  Create the action, specifying that it is an executable action.
+    IAction* pAction{nullptr};
+    hr = pActionCollection->Create( TASK_ACTION_EXEC, &pAction );
+    pActionCollection->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot create the action: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -25;
+    }
+
+    IExecAction* pExecAction{nullptr};
+    //  Query interface for the executable task pointer.
+    hr = pAction->QueryInterface(IID_IExecAction, reinterpret_cast<void**>(&pExecAction));
+    pAction->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"QueryInterface call failed for IExecAction: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -26;
+    }
+
+    //  Set the path of the executable to kuser.exe.
+    //  Set the arguments
+    hr = pExecAction->put_Path(_bstr_t(processPath.data()));
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot put action path: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -27;
+    }
+    
+    std::wstring argument{(L"/k "+sessionIdWStr)};
+    hr = pExecAction->put_Arguments(_bstr_t(argument.data()));
+    pExecAction->Release();
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot put argument: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -28;
+    }
+
+    //  Save the task in the custom folder.
+    IRegisteredTask* pRegisteredTask{nullptr};
+    hr = customFolder->RegisterTaskDefinition(
+            _bstr_t(fullTaskName.data()),
+            pTask,
+            TASK_CREATE_OR_UPDATE, 
+            _variant_t(), 
+            _variant_t(), 
+            TASK_LOGON_S4U,
+            _variant_t(L""),
+            &pRegisteredTask
+    );
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Error saving the Task : "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pTask->Release();
+        CoUninitialize();
+        return -29;
+    }
+    printNewLine();
+    std::wcout<<L"Success! Task successfully registered. ";
+    std::wcout.flush();
+
+    //  Clean up.
+    customFolder->Release();
+    pTask->Release();
+    pRegisteredTask->Release();
+    CoUninitialize();
+    return 1;
+}
+
+short checkExistingTask(){  
+    //  ------------------------------------------------------
+    //  Initialize COM.
+    HRESULT hr {CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE)};
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"CoInitializeEx failed: "<<hr;printNewLine();
+        return -1;
+    }
+
+        //  Set general COM security levels.
+    hr = CoInitializeSecurity(
+        NULL,
+        -1,
+        NULL,
+        NULL,
+        RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        NULL,
+        0,
+        NULL
+    );
+
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"CoInitializeSecurity failed: "<<hr;printNewLine();
+        CoUninitialize();
+        return -2;
+    }
+
+    //  Create an instance of the Task Service. 
+    ITaskService* pService {nullptr};
+    hr = CoCreateInstance( 
+        CLSID_TaskScheduler,
+        NULL,
+        CLSCTX_INPROC_SERVER,
+        IID_ITaskService,
+        reinterpret_cast<void**>(&pService) 
+    );  
+    if (FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Failed to create an instance of ITaskService: "<<hr;
+        printNewLine();
+        CoUninitialize();
+        return -3;
+    }
+        
+    //  Connect to the task service.
+    hr = pService->Connect(_variant_t(), _variant_t(),_variant_t(), _variant_t());
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"ITaskService::Connect failed: "<<hr;
+        printNewLine();
+        pService->Release();
+        CoUninitialize();
+        return -4;
+    }
+
+    //  Get the pointer to the custom task folder.
+    ITaskFolder* customFolder{nullptr};
+    hr = pService->GetFolder(_bstr_t(customTaskFolder.data()),&customFolder);
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot get custom folder: "<<hr;
+        printNewLine();
+        pService->Release();
+        CoUninitialize();
+        return -5;
+    }
+    
+    //  -------------------------------------------------------
+    //  Get the registered tasks in the folder.
+    IRegisteredTaskCollection* taskCollection{nullptr};
+    hr = customFolder->GetTasks(NULL, &taskCollection);
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Cannot get tasks: "<<hr;
+        printNewLine();
+        pService->Release();
+        customFolder->Release();
+        CoUninitialize();
+        return -6;
+    }
+    long taskCount{};
+    taskCollection->get_Count(&taskCount);
+    
+    short returnCode{1};
+    for(int c{1};c<=taskCount;++c){
+        IRegisteredTask* task{nullptr};
+        ITaskDefinition* taskDefinition{nullptr};
+        IRegistrationInfo* registrationInfo{nullptr};
+        BSTR description{NULL};
+        BSTR definition{NULL};
+        hr = taskCollection->get_Item(variant_t(c),&task);
+        if(FAILED(hr)){
+            printNewLine();
+            std::wcout<<L"Failed to get task at index "<<c;
+            printNewLine();
+            returnCode = -7;
+            continue;
+        }
+        else{
+            double scheduledRunTime{};
+            BSTR readableScheduledRunTime{};
+            hr = task->get_NextRunTime(&scheduledRunTime);
+            if(FAILED(hr)){
+                std::wcout<<L"Failed to get next task runtime";
+                printNewLine();
+                returnCode = -8;
+                continue;
+            }
+            else VarBstrFromDate(scheduledRunTime,NULL,LOCALE_NOUSEROVERRIDE,&readableScheduledRunTime);
+            
+            hr = task->get_Definition(&taskDefinition);
+            if(FAILED(hr)){
+                std::wcout<<L"Failed to get task definition";
+                printNewLine();
+                returnCode = -9;
+                continue;
+            }
+            else{
+                hr = taskDefinition->get_RegistrationInfo(&registrationInfo);
+                if(FAILED(hr)){
+                    std::wcout<<L"Failed to get task registration info";
+                    printNewLine();
+                    returnCode = -10;
+                    continue;
+                }
+                else{
+                    hr = registrationInfo->get_Documentation(&definition);
+                    if(FAILED(hr)){
+                        std::wcout<<L"Failed to get task documentation";
+                        printNewLine();
+                        returnCode = -11;
+                        continue;
+                    }
+                }
+            }
+            taskDefinition->Release();
+            registrationInfo->Release();
+            task->Release();
+            std::wcout<<L"Logoff of "<<definition<<L" scheduled at: "<<readableScheduledRunTime;
+            if(c!=taskCount)printNewLine();
+            SysFreeString(readableScheduledRunTime);SysFreeString(description);
+        }
+    }
+    customFolder->Release();
+    pService->Release();
+    taskCollection->Release();
+    return returnCode;       
 }
