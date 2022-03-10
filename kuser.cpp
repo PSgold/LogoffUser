@@ -35,6 +35,7 @@ int getProcessPath(wchar_t* pathBuff, unsigned short size);
 short querySession();
 short checkExistingTask();
 short scheduleLogoffTask(const std::wstring& sessionIdWStr,const std::wstring& userToLogOff, const std::wstring& time);
+short removeScheduledTask(const std::wstring& userToLogOff);
 
 int __cdecl wmain(int argc, wchar_t* argv[]){
     //Do not sync iostream with C stdio
@@ -85,6 +86,25 @@ int __cdecl wmain(int argc, wchar_t* argv[]){
                 std::wcout<<L"\nFailed to terminate user session";
                 return -1;
             }
+        }
+        else if(
+            (wcscmp(argv[1],L"/del")==0) ||
+            (wcscmp(argv[1],L"/Del")==0) ||
+            (wcscmp(argv[1],L"/dEl")==0) ||
+            (wcscmp(argv[1],L"/deL")==0) ||
+            (wcscmp(argv[1],L"/DEl")==0) ||
+            (wcscmp(argv[1],L"/dEL")==0) ||
+            (wcscmp(argv[1],L"/DeL")==0) ||
+            (wcscmp(argv[1],L"/DEL")==0)
+        ){
+            const std::wstring userToLogOff{argv[2]};
+            short delScheduledTaskResponse{removeScheduledTask(userToLogOff)};
+            if(delScheduledTaskResponse == 1){
+                printNewLine();
+                std::wcout<<L"Successfully Deleted Task to Logoff "<<userToLogOff;
+                printNewLine();
+            }
+            return 0;
         }
         else {printHelp(); return 1;}
     }
@@ -162,7 +182,10 @@ Terminate Session Scheduled
 kuser.exe /k [session id] /t [time]
 
 Check Scheduled Logoff:
-kuser.exe /ch)*"
+kuser.exe /ch
+
+Delete Scheduled Logoff:
+kuser.exe /del [username])*"
 	};
 	std::cout<<help<<'\n'<<'\n';
     std::cout.flush();
@@ -790,13 +813,13 @@ short checkExistingTask(){
         IRegisteredTask* task{nullptr};
         ITaskDefinition* taskDefinition{nullptr};
         IRegistrationInfo* registrationInfo{nullptr};
-        BSTR description{NULL};
         BSTR definition{NULL};
         hr = taskCollection->get_Item(variant_t(c),&task);
         if(FAILED(hr)){
             printNewLine();
             std::wcout<<L"Failed to get task at index "<<c;
             printNewLine();
+            SysFreeString(definition);
             returnCode = -7;
             continue;
         }
@@ -807,7 +830,14 @@ short checkExistingTask(){
             if(FAILED(hr)){
                 std::wcout<<L"Failed to get next task runtime";
                 printNewLine();
+                task->Release();
+                SysFreeString(readableScheduledRunTime);SysFreeString(definition);
                 returnCode = -8;
+                continue;
+            }
+            else if (scheduledRunTime == NULL){
+                task->Release();
+                SysFreeString(readableScheduledRunTime);SysFreeString(definition);
                 continue;
             }
             else VarBstrFromDate(scheduledRunTime,NULL,LOCALE_NOUSEROVERRIDE,&readableScheduledRunTime);
@@ -816,6 +846,8 @@ short checkExistingTask(){
             if(FAILED(hr)){
                 std::wcout<<L"Failed to get task definition";
                 printNewLine();
+                task->Release();
+                SysFreeString(readableScheduledRunTime);SysFreeString(definition);
                 returnCode = -9;
                 continue;
             }
@@ -824,6 +856,9 @@ short checkExistingTask(){
                 if(FAILED(hr)){
                     std::wcout<<L"Failed to get task registration info";
                     printNewLine();
+                    task->Release();
+                    taskDefinition->Release();
+                    SysFreeString(readableScheduledRunTime);SysFreeString(definition);
                     returnCode = -10;
                     continue;
                 }
@@ -832,6 +867,10 @@ short checkExistingTask(){
                     if(FAILED(hr)){
                         std::wcout<<L"Failed to get task documentation";
                         printNewLine();
+                        task->Release();
+                        taskDefinition->Release();
+                        registrationInfo->Release();
+                        SysFreeString(readableScheduledRunTime);SysFreeString(definition);
                         returnCode = -11;
                         continue;
                     }
@@ -842,11 +881,103 @@ short checkExistingTask(){
             task->Release();
             std::wcout<<L"Logoff of "<<definition<<L" scheduled at: "<<readableScheduledRunTime;
             if(c!=taskCount)printNewLine();
-            SysFreeString(readableScheduledRunTime);SysFreeString(description);
+            SysFreeString(readableScheduledRunTime);SysFreeString(definition);
         }
     }
     customFolder->Release();
     pService->Release();
     taskCollection->Release();
+    CoUninitialize();
     return returnCode;       
+}
+
+short removeScheduledTask(const std::wstring& userToLogOff){
+    //  ------------------------------------------------------
+    //  Initialize COM.
+    HRESULT hr {CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE)};
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"CoInitializeEx failed: "<<hr;printNewLine();
+        return -2;
+    }
+
+        //  Set general COM security levels.
+    hr = CoInitializeSecurity(
+        NULL,
+        -1,
+        NULL,
+        NULL,
+        RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        NULL,
+        0,
+        NULL
+    );
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"CoInitializeSecurity failed: "<<hr;printNewLine();
+        CoUninitialize();
+        return -3;
+    }
+    
+    //  Create an instance of the Task Service. 
+    ITaskService* pService {nullptr};
+    hr = CoCreateInstance( 
+        CLSID_TaskScheduler,
+        NULL,
+        CLSCTX_INPROC_SERVER,
+        IID_ITaskService,
+        reinterpret_cast<void**>(&pService) 
+    );  
+    if (FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Failed to create an instance of ITaskService: "<<hr;
+        printNewLine();
+        CoUninitialize();
+        return -4;
+    }
+        
+    //  Connect to the task service.
+    hr = pService->Connect(_variant_t(), _variant_t(),_variant_t(), _variant_t());
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"ITaskService::Connect failed: "<<hr;
+        printNewLine();
+        pService->Release();
+        CoUninitialize();
+        return -5;
+    }
+
+    //  Get the pointer to the custom task folder. The custom task folder holds the
+    //  existing registered tasks
+    ITaskFolder* customFolder {nullptr};
+    hr = pService->GetFolder(_bstr_t(customTaskFolder.data()),&customFolder);
+    if(FAILED(hr)){
+        if(FAILED(hr)){
+            printNewLine();
+            std::wcout<<L"Cannot get custom folder: "<<hr;
+            printNewLine();
+            pService->Release();
+            CoUninitialize();
+            return -6;
+        }
+    }
+    
+    //  Delete the task
+    const std::wstring fullTaskName{baseTaskName+userToLogOff};
+    hr = customFolder->DeleteTask( _bstr_t(fullTaskName.data()), 0);
+    if(FAILED(hr)){
+        printNewLine();
+        std::wcout<<L"Failed to delete the task: "<<hr;
+        printNewLine();
+        customFolder->Release();
+        pService->Release();
+        CoUninitialize();
+        return -7;
+    }
+    
+    customFolder->Release();
+    pService->Release();
+    CoUninitialize();
+    return 1;
 }
